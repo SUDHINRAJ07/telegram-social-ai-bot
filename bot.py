@@ -24,15 +24,17 @@ if sys.platform.startswith('win'):
 
 # ================= Configuration =================
 TELEGRAM_BOT_TOKEN = "8763763506:AAHjvN7Yw86oNBsYmyqSKNTqOQ1yx_w2llg"
-GEMINI_API_KEY = "AQ.Ab8RN6LpXEJ00GXrdMA-ZVEJVSLPgaTsf8L8ZRGMt2Efm3lWiw"
 FACEBOOK_PAGE_ID = "1276584508878950"
 # 100% Never-Expiring Lifetime Facebook Page Access Token (expires_at: 0)
 FACEBOOK_PAGE_ACCESS_TOKEN = "EAANEBDbaqKYBShXy0ZCIXSlRIGIpZAzK6QCWCQrPLyIjNYDjAtxPcnRU9kMDkU7XSxsbjD3oZCwZB76IQGcYQrUxqkRb4KZCIUZAgB3VWhwxaQOvkuaSJhdp8xFwiZBj2hsuZAFCWH1h7KfTZBRrwd3MKA41lnnQs4LQQyvJWFGZACkZALj4NZBdMpavXu4o9973SZAjC5YJQxqni"
 
-# Cloudflare Workers AI Configuration (Pure Cloudflare Only)
+# Cloudflare Workers AI Configuration
 CLOUDFLARE_ACCOUNT_ID = "222270a5d0bd73142a8b7e97b511281b"
 _DEFAULT_CF_TOKEN = base64.b64decode("Y2Z1dF9XQzNTR2ZCOVRmU2VhWU9TTmZvcUl3amJ2cGFkNVZta3FwTzFBUGxoZjgxZjVjZjU=").decode("utf-8")
 CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", _DEFAULT_CF_TOKEN)
+
+# Rate limit cache to prevent freezing when Cloudflare daily neurons are exhausted
+cf_rate_limited_until = 0
 
 # Instagram Configuration (Account: @sudhin.s.96)
 INSTAGRAM_USER_ID = "28921702917447910"
@@ -50,11 +52,11 @@ http_session.headers.update({
 })
 
 # ================= Cloud 24/7 Health Check Server =================
-# Enables 100% Free Hosting on Render / Koyeb / Cloud Containers without sleeping
+# Enables 100% Free Hosting on Render / Koyeb without sleeping
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-type", "text/plain")
+        self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write(b"Social Media AI Agent Bot is Running Live 24/7!")
     def log_message(self, format, *args):
@@ -71,6 +73,20 @@ def run_health_server():
 
 threading.Thread(target=run_health_server, daemon=True).start()
 
+# Keep-Alive Self-Pinger: Prevents Render free tier from going to sleep after 15 minutes of inactivity
+def keep_alive_pinger():
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "https://telegram-social-ai-bot.onrender.com")
+    time.sleep(30)
+    while True:
+        try:
+            r = http_session.get(render_url, timeout=10)
+            print(f"[KEEP-ALIVE] Pinged {render_url} (status: {r.status_code}) to keep bot awake 24/7.")
+        except Exception as e:
+            print(f"[KEEP-ALIVE] Ping notice: {e}")
+        time.sleep(540) # Ping every 9 minutes
+
+threading.Thread(target=keep_alive_pinger, daemon=True).start()
+
 # In-memory session store: {chat_id: {caption, image_bytes, image_url, prompt}}
 user_sessions = {}
 
@@ -83,6 +99,7 @@ def clean_user_prompt(prompt: str) -> str:
         "generate a ad for", "generate an ad for", "generate ad for",
         "make a ad for", "make an ad for", "make ad for",
         "create a photo for", "create a picture of", "make a photo of",
+        "create a premium", "generate a premium", "imagine a", "imagine",
         "ad for", "photo of"
     ]
     for pref in prefixes:
@@ -91,128 +108,238 @@ def clean_user_prompt(prompt: str) -> str:
     return p
 
 def optimize_visual_prompt(raw_prompt: str) -> str:
-    """Understands Tanglish/Tamil/English user prompt and transforms it into a 4K photorealistic visual description for Flux."""
+    """Understands user prompt and transforms it into a 4K photorealistic visual description."""
+    global cf_rate_limited_until
     clean_p = clean_user_prompt(raw_prompt)
-    cf_token = os.getenv("CLOUDFLARE_API_TOKEN", CLOUDFLARE_API_TOKEN)
-    
-    # Use Cloudflare Llama 3.1 to understand Tanglish and build world-class visual prompt
-    try:
-        url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct"
-        sys_msg = (
-            "You are an expert AI prompt engineer for photographic image generation (Flux / SDXL).\n"
-            "The user input may be in Tanglish (Tamil in English letters), Tamil, or English.\n"
-            "Translate any Tanglish into English if needed, and write a single, rich, photorealistic visual scene description.\n"
-            "Always include the primary physical product or subject, setting, studio lighting, materials, and high-detail aesthetics.\n"
-            "Output ONLY the prompt in English. No introductory text, no explanations, no quotes."
-        )
-        payload = {
-            "messages": [
-                {"role": "system", "content": sys_msg},
-                {"role": "user", "content": clean_p}
-            ]
-        }
-        headers = {"Authorization": f"Bearer {cf_token}", "Content-Type": "application/json"}
-        resp = requests.post(url, headers=headers, json=payload, timeout=12)
-        if resp.status_code == 200:
-            text = resp.json().get("result", {}).get("response", "").strip()
-            if text and len(text) > 10:
-                print(f"[AI Prompt Optimizer] Generated visual prompt:\n{text[:120]}...")
-                return text
-    except Exception as e:
-        print(f"[Prompt Optimizer Error] {e}")
+    p_lower = clean_p.lower()
 
-    return clean_p
+    # Detect if prompt is already a detailed scene or landscape
+    is_scene_or_fantasy = any(k in p_lower for k in [
+        'scene', 'landscape', 'fantasy', 'adventure', 'island', 'ruins',
+        'sword', 'jagged cliff', 'waterfall', 'cyberpunk', 'cityscape', 'mountain'
+    ])
+
+    if is_scene_or_fantasy:
+        return f"{clean_p}, 8k resolution, cinematic lighting, masterpiece, photorealistic, ultra-detailed"
+
+    # If Cloudflare AI is active and not rate-limited, try Llama prompt expansion
+    cf_token = os.getenv("CLOUDFLARE_API_TOKEN", CLOUDFLARE_API_TOKEN)
+    if time.time() > cf_rate_limited_until:
+        try:
+            url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct"
+            sys_msg = (
+                "You are an expert AI prompt engineer for photographic image generation (Flux / SDXL).\n"
+                "The user input may be in Tanglish, Tamil, or English.\n"
+                "Write a single, rich, photorealistic visual scene description in English.\n"
+                "Output ONLY the prompt. No introductory text, no explanations, no quotes."
+            )
+            payload = {
+                "messages": [
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": clean_p}
+                ]
+            }
+            headers = {"Authorization": f"Bearer {cf_token}", "Content-Type": "application/json"}
+            resp = requests.post(url, headers=headers, json=payload, timeout=8)
+            if resp.status_code == 200:
+                text = resp.json().get("result", {}).get("response", "").strip()
+                if text and len(text) > 10:
+                    return text
+            elif resp.status_code == 429:
+                cf_rate_limited_until = time.time() + 1800
+        except Exception as e:
+            print(f"[Prompt Optimizer Error] {e}")
+
+    # High quality fallback prompt construction
+    if len(clean_p.split()) <= 6:
+        # Short product keyword (e.g. 'Luxury wristwatch' or 'Running shoes')
+        return f"commercial advertisement product photography of {clean_p}, 4k ultra hd, cinematic studio lighting, minimalist product podium, highly detailed, sharp focus, 8k resolution"
+    else:
+        # Long detailed user prompt
+        return f"{clean_p}, 8k resolution, commercial grade, sharp focus, cinematic studio lighting"
 
 def generate_caption(prompt: str) -> str:
-    """Generates an engaging, high-converting ~5-6 line social media caption followed directly by clean hashtags."""
+    """Generates an engaging ~4-line social media caption followed directly by clean hashtags."""
+    global cf_rate_limited_until
     clean_p = clean_user_prompt(prompt)
-    cf_token = os.getenv("CLOUDFLARE_API_TOKEN", CLOUDFLARE_API_TOKEN)
+    p_lower = clean_p.lower()
 
-    # Detect if user wrote in Tanglish using strict whole-word matching (avoids substring false positives like 'layout' or 'glass')
+    # Detect Tanglish using strict whole-word matching
     tanglish_markers = {
         'venum', 'kudunga', 'pannunga', 'pannu', 'kooda', 'irukku',
         'irukanum', 'epudi', 'nan', 'enakku', 'makkale', 'patta',
-        'edhaavathu', 'panna', 'sollu', 'podu', 'thara', 'avolothaa', 'mari'
+        'edhaavathu', 'panna', 'sollu', 'podu', 'thara', 'avolothaa', 'mari',
+        'nalla', 'oru', 'super', 'semma', 'ippo', 'unga', 'romba', 'pudicha'
     }
-    tokens = set(re.findall(r'\b[a-zA-Z]+\b', clean_p.lower()))
+    tokens = set(re.findall(r'\b[a-zA-Z]+\b', p_lower))
     is_tanglish = bool(tokens.intersection(tanglish_markers))
 
-    # 1. Primary: Cloudflare Llama 3.1
-    try:
-        url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct"
+    # 1. Primary: Cloudflare Llama 3.1 (if not rate-limited)
+    cf_token = os.getenv("CLOUDFLARE_API_TOKEN", CLOUDFLARE_API_TOKEN)
+    if time.time() > cf_rate_limited_until:
+        try:
+            url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct"
+            if is_tanglish:
+                sys_msg = (
+                    "You are an expert commercial copywriter for Instagram & Facebook.\n"
+                    "Write a clean, conversational 4-line commercial caption in natural Tanglish (Tamil words written in English letters).\n"
+                    "Do NOT write about prompts or instructions. Write directly as the brand promoting the subject.\n\n"
+                    "Structure:\n"
+                    "Line 1: Punchy hook with emoji in Tanglish\n"
+                    "Line 2-3: 2 short lines on benefits and style in Tanglish\n"
+                    "Line 4: Call-To-Action in Tanglish (e.g. Ippovae check out pannunga, link in bio 🛍️)\n\n"
+                    "Followed by a blank line and 4-5 relevant product hashtags.\n"
+                    "CRITICAL RULES:\n"
+                    "- English letters only, NO Tamil script.\n"
+                    "- NEVER include #tanglish, #thanglish, or #tamil in hashtags.\n"
+                    "- Exactly around 4 lines of caption text.\n"
+                    "- Output ONLY the final caption with hashtags."
+                )
+            else:
+                sys_msg = (
+                    "You are an expert commercial copywriter for Instagram & Facebook.\n"
+                    "Write a clean, professional, 4-line commercial caption about the subject.\n"
+                    "Do NOT write about prompts, layouts, or instructions. Write directly as the brand.\n\n"
+                    "Structure:\n"
+                    "Line 1: Punchy hook sentence with emoji\n"
+                    "Line 2-3: 2 short lines on benefits and premium quality\n"
+                    "Line 4: Clear Call-To-Action (e.g. Discover more via link in bio 🛍️)\n\n"
+                    "Followed by a blank line and 4-5 relevant hashtags.\n"
+                    "CRITICAL RULES:\n"
+                    "- Write entirely in 100% English. NO Tamil/Tanglish words.\n"
+                    "- NEVER include #tanglish or #thanglish in hashtags.\n"
+                    "- Exactly around 4 lines of caption text.\n"
+                    "- Output ONLY the final caption with hashtags."
+                )
+
+            payload = {
+                "messages": [
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": clean_p}
+                ]
+            }
+            headers = {"Authorization": f"Bearer {cf_token}", "Content-Type": "application/json"}
+            resp = requests.post(url, headers=headers, json=payload, timeout=8)
+            if resp.status_code == 200:
+                text = resp.json().get("result", {}).get("response", "").strip()
+                if text and len(text) > 30:
+                    text = text.replace('**', '').strip()
+                    if text.startswith('"') and text.endswith('"'):
+                        text = text[1:-1].strip()
+                    # Clean any unwanted #tanglish or #thanglish tags
+                    text = re.sub(r'#(?:t[ha]nglish|tamil(?:nadu)?)\b', '', text, flags=re.IGNORECASE).strip()
+                    return text
+            elif resp.status_code == 429:
+                cf_rate_limited_until = time.time() + 1800
+        except Exception as e:
+            print(f"[Cloudflare LLM Caption Error] {e}")
+
+    # 2. Semantic Fallback Engine: Context-aware 4-line captions
+    if any(k in p_lower for k in ['fantasy', 'video game', 'mythical', 'floating island', 'waterfall', 'ruins', 'sword', 'jagged cliff', 'gaming', 'adventurer']):
         if is_tanglish:
-            sys_msg = (
-                "You are an expert commercial copywriter for Instagram & Facebook.\n"
-                "Write a clean, conversational 4-line commercial caption in natural Tanglish (Tamil in English letters).\n"
-                "Do NOT write about prompts or instructions. Write directly as the brand promoting the product.\n\n"
-                "Structure:\n"
-                "Line 1: Punchy hook with emoji in Tanglish\n"
-                "Line 2-3: 2 short lines on benefits and style in Tanglish\n"
-                "Line 4: Call-To-Action in Tanglish (e.g. Ippovae check out pannunga, link in bio 🛍️)\n\n"
-                "Followed by a blank line and 4-5 relevant product hashtags.\n"
-                "CRITICAL RULES:\n"
-                "- English letters only, NO Tamil script.\n"
-                "- NEVER include #tanglish, #thanglish, or #tamil in hashtags.\n"
-                "- Exactly around 4 lines of caption text.\n"
-                "- Output ONLY the final caption with hashtags."
+            return (
+                "⚔️ Mythical realm-la unga epic adventure ippo start aaguthu!\n"
+                "Floating islands, ancient ruins & breathtaking landscape vibe.\n"
+                "Gaming lovers-ku ithu ultimate visual feast makkale.\n"
+                "Unread legends-ah explore panna ready-ah irunga 🎮\n\n"
+                "#FantasyArt #GamingWorld #MythicalLandscape #ConceptArt #GameDev"
             )
         else:
-            sys_msg = (
-                "You are an expert commercial copywriter for Instagram & Facebook.\n"
-                "Write a clean, professional, 4-line commercial caption about the product.\n"
-                "Do NOT write about prompts, layouts, or instructions. Write directly as the brand promoting the product.\n\n"
-                "Structure:\n"
-                "Line 1: Punchy hook sentence with emoji\n"
-                "Line 2-3: 2 short lines on benefits and premium quality\n"
-                "Line 4: Clear Call-To-Action (e.g. Shop now via link in bio 🛍️)\n\n"
-                "Followed by a blank line and 4-5 relevant product hashtags.\n"
-                "CRITICAL RULES:\n"
-                "- Write entirely in 100% English. NO Tamil/Tanglish words.\n"
-                "- NEVER include #tanglish or #thanglish in hashtags.\n"
-                "- Exactly around 4 lines of caption text.\n"
-                "- Output ONLY the final caption with hashtags."
+            return (
+                "⚔️ Step into an uncharted realm where ancient legends come alive.\n"
+                "Explore floating islands, cascading waterfalls, and lost mythical ruins.\n"
+                "Stand on the edge of destiny as the horizon burns in gold.\n"
+                "Your next epic fantasy adventure begins now 🎮\n\n"
+                "#FantasyArt #GamingWorld #MythicalLandscape #ConceptArt #EpicAdventure"
             )
-
-        payload = {
-            "messages": [
-                {"role": "system", "content": sys_msg},
-                {"role": "user", "content": clean_p}
-            ]
-        }
-        headers = {"Authorization": f"Bearer {cf_token}", "Content-Type": "application/json"}
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
-        if resp.status_code == 200:
-            text = resp.json().get("result", {}).get("response", "").strip()
-            if text and len(text) > 30:
-                text = text.replace('**', '').strip()
-                if text.startswith('"') and text.endswith('"'):
-                    text = text[1:-1].strip()
-                # Clean any unwanted #tanglish or #thanglish tags
-                text = re.sub(r'#(?:t[ha]nglish|tamil(?:nadu)?)\b', '', text, flags=re.IGNORECASE).strip()
-                return text
-    except Exception as e:
-        print(f"[Cloudflare LLM Caption Error] {e}")
-
-    # Clean keyword for hashtags
-    words = [re.sub(r'[^a-zA-Z0-9]', '', w) for w in clean_p.split() if len(w) > 3]
-    kw = words[0].capitalize() if words else "Product"
-
-    if is_tanglish:
-        return (
-            f"🔥 Semma stylish drop makkale! {kw} ippo live!\n"
-            "Daily look-ku romba aesthetic & comfortable-ah irukkum.\n"
-            "Unakku pudicha style-la stand out pannunga.\n"
-            "Ippovae check out pannunga, link in bio 🛍️\n\n"
-            f"#{kw} #Trending #NewDrop #TopQuality"
-        )
+    elif any(k in p_lower for k in ['skin', 'skincare', 'glow', 'beauty', 'serum', 'lotion', 'cream', 'cosmetic']):
+        if is_tanglish:
+            return (
+                "✨ Radiant & glowing skin ungalukku venuma makkale?\n"
+                "Pure luxury formulation unga skin-ku natural shine tharum.\n"
+                "Daily skincare routine-ku romba perfect & gentle choice.\n"
+                "Ippovae order pannunga, link in bio-la irukku 🛍️\n\n"
+                "#Skincare #GlowingSkin #LuxuryBeauty #CleanSkincare #DailyGlow"
+            )
+        else:
+            return (
+                "✨ Unlock radiant, luminous skin with our ultimate luxury formula.\n"
+                "Infused with pure nourishing actives for a natural, healthy glow.\n"
+                "Elevate your daily self-care ritual with timeless modern elegance.\n"
+                "Experience the transformation today — shop link in bio 🛍️\n\n"
+                "#Skincare #GlowingSkin #LuxuryBeauty #CleanBeauty #RadiantSkin"
+            )
+    elif any(k in p_lower for k in ['watch', 'wristwatch', 'timepiece']):
+        if is_tanglish:
+            return (
+                "⌚ Unga style-ah elevate panna oru timeless luxury watch!\n"
+                "Premium craftsmanship & modern aesthetic look kooda varuthu.\n"
+                "Daily wear-kum special occasions-kum semma match makkale.\n"
+                "Ippovae check out pannunga, link in bio 🛍️\n\n"
+                "#LuxuryWatch #Timepiece #StyleStatement #MensStyle #Accessories"
+            )
+        else:
+            return (
+                "⌚ Define your moments with uncompromising precision and luxury.\n"
+                "Masterfully crafted with timeless elegance for the modern visionary.\n"
+                "A signature statement piece designed to turn heads wherever you go.\n"
+                "Explore the collection today — link in bio 🛍️\n\n"
+                "#LuxuryWatch #Timepiece #WatchCollector #Elegance #StyleStatement"
+            )
+    elif any(k in p_lower for k in ['shoe', 'shoes', 'sneaker', 'sneakers', 'running', 'adidas', 'nike']):
+        if is_tanglish:
+            return (
+                "👟 Step out in ultimate style & unmatched comfort makkale!\n"
+                "Lightweight performance cushioning daily wear-ku semma match.\n"
+                "Streetwear lovers-ku ithu must-have drop.\n"
+                "Stock limited, ippovae grab pannunga — link in bio 🛍️\n\n"
+                "#Sneakers #Streetwear #KicksOfTheDay #UrbanStyle #SneakerHead"
+            )
+        else:
+            return (
+                "👟 Step into unmatched comfort and next-level athletic performance.\n"
+                "Engineered with cutting-edge cushioning for effortless daily momentum.\n"
+                "Bold modern aesthetics tailored for the modern street icon.\n"
+                "Upgrade your rotation now — shop link in bio 🛍️\n\n"
+                "#Sneakers #Streetwear #KicksOfTheDay #UrbanStyle #Footwear"
+            )
+    elif any(k in p_lower for k in ['coffee', 'tea', 'drink', 'bottle', 'beverage', 'juice']):
+        if is_tanglish:
+            return (
+                "☕ Fresh energy & ultimate taste unga favorite sip-la!\n"
+                "Rich brew perfection ungaloda day-ah super energetic-ah maathum.\n"
+                "Quality ingredients-la create panna premium blend.\n"
+                "Taste the magic today — link in bio 🛍️\n\n"
+                "#CoffeeLovers #FreshBrew #DailyEnergy #Beverage #TasteTheVibe"
+            )
+        else:
+            return (
+                "☕ Awaken your senses with the rich, bold essence of pure perfection.\n"
+                "Crafted from premium ingredients for an extraordinary, smooth taste.\n"
+                "The ultimate refreshment to fuel your passion and elevate your day.\n"
+                "Savor the moment today — order via link in bio 🛍️\n\n"
+                "#CoffeeLovers #FreshBrew #ColdBrew #Artisanal #DailyPerfection"
+            )
     else:
-        return (
-            f"✨ Elevate your everyday aesthetic with {kw}.\n"
-            "Crafted with perfection for those who demand ultimate sophistication.\n"
-            "Experience the premium finish and iconic design you deserve.\n"
-            "Discover the collection today — link in bio 🛍️\n\n"
-            f"#{kw} #Trending #Aesthetic #MustHave #LuxuryVibes"
-        )
+        words = [re.sub(r'[^a-zA-Z0-9]', '', w) for w in clean_p.split() if len(w) > 3]
+        kw = words[0].capitalize() if words else "Product"
+        kw2 = words[1].capitalize() if len(words) > 1 else "Trending"
+        if is_tanglish:
+            return (
+                f"🔥 Semma stylish & premium quality {kw} ippo live!\n"
+                "Top-notch aesthetic design unga lifestyle-ku perfect match.\n"
+                "Stand out style-la ungalukku pidicha luxury vibe.\n"
+                "Ippovae grab pannunga, link in bio-la irukku 🛍️\n\n"
+                f"#{kw} #{kw2} #Trending #PremiumVibe #NewDrop"
+            )
+        else:
+            return (
+                f"✨ Elevate your everyday aesthetic with the all-new {kw}.\n"
+                "Designed with precision craftsmanship for ultimate sophistication.\n"
+                "Experience the seamless blend of premium quality and iconic style.\n"
+                "Discover yours today — shop link in bio 🛍️\n\n"
+                f"#{kw} #{kw2} #Trending #LuxuryVibes #MustHave"
+            )
 
 def strip_watermark(image_bytes: bytes) -> bytes:
     """Removes any watermark/logo banner from the bottom of fallback images."""
@@ -231,64 +358,69 @@ def strip_watermark(image_bytes: bytes) -> bytes:
         print(f"[Watermark Clean Error] {e}")
         return image_bytes
 
-def generate_image_bytes(prompt: str):
-    """Generates 4K product photography image with Cloudflare Workers AI and ultra-fast clean failover."""
-    clean_p = clean_user_prompt(prompt)
-    lowered = clean_p.lower()
-    product_detail = ""
-    if any(k in lowered for k in ['skincare', 'skin care', 'beauty', 'cosmetic', 'lotion', 'serum', 'cream']):
-        if not any(k in lowered for k in ['bottle', 'jar', 'packaging', 'container', 'tube', 'dropper']):
-            product_detail = ", luxury glass cosmetic serum dropper bottle and cream jar packaging centered on podium"
-
-    enhanced_prompt = f"commercial advertisement product photography of {clean_p}{product_detail}, 4k ultra hd, cinematic studio lighting, minimalist product podium, highly detailed, sharp focus, 8k resolution"
-
-    # 1. Cloudflare Workers AI Multi-Model Suite
+def generate_image_bytes(visual_prompt: str):
+    """Generates 4K product photography image with Cloudflare Workers AI and clean failovers."""
+    global cf_rate_limited_until
     cf_token = os.getenv("CLOUDFLARE_API_TOKEN", CLOUDFLARE_API_TOKEN)
-    cf_models = [
-        "@cf/black-forest-labs/flux-1-schnell",
-        "@cf/bytedance/stable-diffusion-xl-lightning",
-        "@cf/stabilityai/stable-diffusion-xl-base-1.0"
-    ]
-    cf_headers = {
-        "Authorization": f"Bearer {cf_token}",
-        "Content-Type": "application/json"
-    }
 
-    for model in cf_models:
-        cf_url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{model}"
-        try:
-            print(f"[Cloudflare AI] Generating image with model '{model}'...")
-            resp = requests.post(cf_url, headers=cf_headers, json={"prompt": enhanced_prompt}, timeout=30)
-            if resp.status_code == 200:
-                ct = resp.headers.get("content-type", "")
-                if "application/json" in ct:
-                    data = resp.json()
-                    if "result" in data and "image" in data["result"]:
-                        img_bytes = base64.b64decode(data["result"]["image"])
-                        print(f"[Cloudflare AI] Success with {model}! Image size: {len(img_bytes)} bytes (100% CLEAN - NO WATERMARK)")
-                        return img_bytes, "cloudflare"
-                elif "image/" in ct and len(resp.content) > 1000:
-                    print(f"[Cloudflare AI] Success with {model}! Raw image size: {len(resp.content)} bytes (100% CLEAN - NO WATERMARK)")
-                    return resp.content, "cloudflare"
-            else:
-                print(f"[Cloudflare AI Notice] Status {resp.status_code}: {resp.text[:200]}")
-        except Exception as e:
-            print(f"[Cloudflare AI Error on {model}] {e}")
+    # 1. Cloudflare Workers AI: Fast SDXL Lightning (Uses 10x fewer neurons, 20+ images/day)
+    if time.time() > cf_rate_limited_until:
+        cf_models = [
+            "@cf/bytedance/stable-diffusion-xl-lightning",
+            "@cf/black-forest-labs/flux-1-schnell"
+        ]
+        cf_headers = {
+            "Authorization": f"Bearer {cf_token}",
+            "Content-Type": "application/json"
+        }
+        for model in cf_models:
+            cf_url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{model}"
+            try:
+                print(f"[Cloudflare AI] Generating image with model '{model}'...")
+                resp = requests.post(cf_url, headers=cf_headers, json={"prompt": visual_prompt}, timeout=15)
+                if resp.status_code == 200:
+                    ct = resp.headers.get("content-type", "")
+                    if "application/json" in ct:
+                        data = resp.json()
+                        if "result" in data and "image" in data["result"]:
+                            img_bytes = base64.b64decode(data["result"]["image"])
+                            print(f"[Cloudflare AI] Success with {model}! Image size: {len(img_bytes)} bytes (100% CLEAN - NO WATERMARK)")
+                            return img_bytes, "cloudflare"
+                    elif "image/" in ct and len(resp.content) > 1000:
+                        print(f"[Cloudflare AI] Success with {model}! Raw image size: {len(resp.content)} bytes (100% CLEAN - NO WATERMARK)")
+                        return resp.content, "cloudflare"
+                elif resp.status_code == 429:
+                    print(f"[Cloudflare AI Notice] Daily neuron limit reached (Status 429). Activating fast failover...")
+                    cf_rate_limited_until = time.time() + 1800
+                    break
+            except Exception as e:
+                print(f"[Cloudflare AI Error on {model}] {e}")
 
-    # 2. Ultra-Fast Clean Failover (Takes only 2-3 seconds, ZERO WATERMARK)
+    # 2. Fast Clean Failover (Takes only 2-3 seconds, ZERO WATERMARK)
     print("[Image Gen] Switching to ultra-fast clean engine (Zero Watermark)...")
-    encoded = urllib.parse.quote(enhanced_prompt)
-    for fb_model, fb_timeout in [("turbo", 15), ("flux", 40)]:
+    encoded = urllib.parse.quote(visual_prompt)
+    for fb_model in ["sana", "turbo"]:
         try:
             seed = random.randint(1000, 999999)
             img_url = f"https://image.pollinations.ai/prompt/{encoded}?model={fb_model}&width=1024&height=1024&nologo=true&seed={seed}"
-            resp = http_session.get(img_url, timeout=fb_timeout)
-            if resp.status_code == 200 and len(resp.content) > 10000:
+            resp = http_session.get(img_url, timeout=18)
+            if resp.status_code == 200 and len(resp.content) > 5000:
                 clean_bytes = strip_watermark(resp.content)
                 print(f"[Image Gen] Clean Image Ready with {fb_model}! Size: {len(clean_bytes)} bytes (Zero Watermark)")
                 return clean_bytes, None
         except Exception as e:
             print(f"[Engine {fb_model} notice] {e}")
+
+    # 3. Direct Prompt Failover
+    try:
+        seed = random.randint(1000, 999999)
+        img_url = f"https://image.pollinations.ai/prompt/{encoded}?seed={seed}"
+        resp = http_session.get(img_url, timeout=15)
+        if resp.status_code == 200 and len(resp.content) > 5000:
+            clean_bytes = strip_watermark(resp.content)
+            return clean_bytes, None
+    except Exception as e:
+        print(f"[Direct Engine notice] {e}")
 
     return None, None
 
@@ -297,7 +429,6 @@ def get_public_image_url(image_bytes: bytes, existing_url: str = None) -> str:
     if existing_url and existing_url.startswith("http"):
         return existing_url
 
-    # Upload to fast public image hosts (Catbox or tmpfiles) for Instagram Graph API
     try:
         r = requests.post(
             'https://catbox.moe/user/api.php',
@@ -368,7 +499,12 @@ def post_to_instagram(image_bytes: bytes, image_url: str, caption: str):
         container_id = r_json["id"]
 
         # Wait for Instagram media processing
-        time.sleep(3)
+        status_url = f"https://graph.instagram.com/v21.0/{container_id}?fields=status_code&access_token={INSTAGRAM_ACCESS_TOKEN}"
+        for _ in range(10):
+            time.sleep(3)
+            s_res = requests.get(status_url, timeout=15).json()
+            if s_res.get("status_code") == "FINISHED":
+                break
 
         # Step 2: Publish media container
         pub_url = f"https://graph.instagram.com/v21.0/{INSTAGRAM_USER_ID}/media_publish"
@@ -420,55 +556,71 @@ def handle_prompt(message):
     raw_prompt = message.text.strip()
     clean_p = clean_user_prompt(raw_prompt)
 
-    status_msg = bot.send_message(
-        chat_id,
-        "🎨 *Analyzing prompt & creating 4K visuals...*\n\n"
-        "⏳ *Generating photorealistic scene & viral caption...*",
-        parse_mode="Markdown"
-    )
-
-    # 1. Optimize Prompt for visual generation (Understands Tanglish & builds 4K scene)
-    visual_prompt = optimize_visual_prompt(clean_p)
-
-    # 2. Generate Image with Flux-1
-    img_bytes, img_url = generate_image_bytes(visual_prompt)
-    if not img_bytes:
-        bot.edit_message_text(
-            "❌ Image server is busy. Please send the message again or try another keyword!",
-            chat_id,
-            status_msg.message_id
-        )
-        return
-
-    # 3. Generate Caption (Supports Tanglish & English)
-    caption = generate_caption(raw_prompt)
-
-    # Store in session
-    user_sessions[chat_id] = {
-        "caption": caption,
-        "image_bytes": img_bytes,
-        "image_url": img_url,
-        "prompt": clean_p
-    }
-
-    # Delete status message
+    status_msg = None
     try:
-        bot.delete_message(chat_id, status_msg.message_id)
+        status_msg = bot.send_message(
+            chat_id,
+            "🎨 *Analyzing prompt & creating 4K visuals...*\n\n"
+            "⏳ *Generating photorealistic scene & viral caption...*",
+            parse_mode="Markdown"
+        )
     except Exception:
-        pass
+        try:
+            status_msg = bot.send_message(chat_id, "🎨 Generating 4K visuals & viral caption, please wait...")
+        except Exception as e:
+            print(f"[Telegram status send error] {e}")
 
-    # Telegram caption character limit is 1024 chars
-    display_caption = caption
-    if len(display_caption) > 1000:
-        display_caption = display_caption[:990] + "..."
+    try:
+        # 1. Optimize Prompt for visual generation
+        visual_prompt = optimize_visual_prompt(clean_p)
 
-    # Send photo with action keyboard
-    bot.send_photo(
-        chat_id,
-        photo=io.BytesIO(img_bytes),
-        caption=display_caption,
-        reply_markup=build_action_keyboard()
-    )
+        # 2. Generate Image with Flux/SDXL and clean failover
+        img_bytes, img_url = generate_image_bytes(visual_prompt)
+        if not img_bytes:
+            err_msg = "⚠️ Image server is busy. Please send your prompt again in a few moments!"
+            if status_msg:
+                try:
+                    bot.edit_message_text(err_msg, chat_id, status_msg.message_id)
+                except Exception:
+                    bot.send_message(chat_id, err_msg)
+            else:
+                bot.send_message(chat_id, err_msg)
+            return
+
+        # 3. Generate Caption (Supports Tanglish & English)
+        caption = generate_caption(raw_prompt)
+
+        # Store in session
+        user_sessions[chat_id] = {
+            "caption": caption,
+            "image_bytes": img_bytes,
+            "image_url": img_url,
+            "prompt": clean_p
+        }
+
+        # Delete status message
+        if status_msg:
+            try:
+                bot.delete_message(chat_id, status_msg.message_id)
+            except Exception:
+                pass
+
+        # Telegram caption limit is 1024 chars
+        display_caption = caption[:990] if len(caption) > 1000 else caption
+
+        # Send photo with action keyboard
+        bot.send_photo(
+            chat_id,
+            photo=io.BytesIO(img_bytes),
+            caption=display_caption,
+            reply_markup=build_action_keyboard()
+        )
+    except Exception as e:
+        print(f"[Handle Prompt Error] {e}")
+        bot.send_message(
+            chat_id,
+            f"⚠️ An error occurred while generating: {str(e)[:120]}. Please try sending your prompt again!"
+        )
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
@@ -575,7 +727,7 @@ def handle_callback(call):
                 reply_markup=build_action_keyboard()
             )
         except Exception:
-            bot.send_message(chat_id, f"📝 *New Caption:*\n\n{disp}", reply_markup=build_action_keyboard())
+            bot.send_message(chat_id, f"📝 *New Caption:*\n\n{new_caption}")
 
     elif call.data == "regen_image":
         if not session:
@@ -583,14 +735,16 @@ def handle_callback(call):
             return
 
         bot.answer_callback_query(call.id, "🎨 Generating new 4K image variation...")
-        img_bytes, img_url = generate_image_bytes(session["prompt"])
+        visual_p = optimize_visual_prompt(session["prompt"])
+        img_bytes, img_url = generate_image_bytes(visual_p)
         if img_bytes:
             session["image_bytes"] = img_bytes
             session["image_url"] = img_url
+            disp = session["caption"][:990] if len(session["caption"]) > 1000 else session["caption"]
             bot.send_photo(
                 chat_id,
                 photo=io.BytesIO(img_bytes),
-                caption=session["caption"][:1000],
+                caption=disp,
                 reply_markup=build_action_keyboard()
             )
         else:
@@ -601,8 +755,9 @@ if __name__ == "__main__":
     print("[BOT] Social Media Agent AI Telegram Bot is starting...")
     print(f"[BOT] Connected Facebook Page ID: {FACEBOOK_PAGE_ID}")
     print(f"[BOT] Connected Instagram Account: @{INSTAGRAM_USERNAME} (ID: {INSTAGRAM_USER_ID})")
-    print("[BOT] Image Engine: Pure Cloudflare Workers AI Suite (Flux 1 Schnell & SDXL) - ACTIVE")
-    print("[BOT] Caption Engine: Gemini AI with Auto-Fallback (ACTIVE)")
+    print("[BOT] Image Engine: Cloudflare Workers AI + Ultra-Clean Failover - ACTIVE")
+    print("[BOT] Caption Engine: Dual-Mode Tanglish/English 4-Line Copywriter - ACTIVE")
+    print("[BOT] Cloud 24/7 Keep-Alive: Ping enabled (Render never sleeps)")
     print("[BOT] Polling Telegram servers for incoming user messages... (READY)")
     print("=" * 60)
     bot.infinity_polling(timeout=25, long_polling_timeout=25)
