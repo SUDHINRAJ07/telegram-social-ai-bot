@@ -128,43 +128,49 @@ def generate_caption(prompt: str) -> str:
     clean_p = clean_user_prompt(prompt)
     cf_token = os.getenv("CLOUDFLARE_API_TOKEN", CLOUDFLARE_API_TOKEN)
 
-    # Detect if user wrote in Tanglish
-    is_tanglish = any(t in clean_p.lower() for t in ["venum", "oru", "la", "kooda", "pannu", "mari", "irukanum", "super", "panna", "edhaavathu", "nalla"])
+    # Detect if user wrote in Tanglish using strict whole-word matching (avoids substring false positives like 'layout' or 'glass')
+    tanglish_markers = {
+        'venum', 'kudunga', 'pannunga', 'pannu', 'kooda', 'irukku',
+        'irukanum', 'epudi', 'nan', 'enakku', 'makkale', 'patta',
+        'edhaavathu', 'panna', 'sollu', 'podu', 'thara', 'avolothaa', 'mari'
+    }
+    tokens = set(re.findall(r'\b[a-zA-Z]+\b', clean_p.lower()))
+    is_tanglish = bool(tokens.intersection(tanglish_markers))
 
     # 1. Primary: Cloudflare Llama 3.1
     try:
         url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct"
         if is_tanglish:
             sys_msg = (
-                "You are an elite social media copywriter for Instagram & Facebook.\n"
-                "The user wrote in Tanglish (Tamil written in English letters).\n"
-                "Write a single, high-converting social media caption entirely in natural, trendy Tanglish (English letters only, NO Tamil script).\n"
+                "You are an expert commercial copywriter for Instagram & Facebook.\n"
+                "Write a clean, conversational 4-line commercial caption in natural Tanglish (Tamil in English letters).\n"
+                "Do NOT write about prompts or instructions. Write directly as the brand promoting the product.\n\n"
                 "Structure:\n"
-                "- Hook sentence with emoji\n"
-                "- 3-4 short engaging lines explaining benefits and vibe\n"
-                "- Call to action (e.g. Ippovae grab pannunga, link in bio)\n"
-                "- Total caption body: 5 to 6 lines\n"
-                "- Followed by a blank line and 4-6 clean hashtags (e.g. #Style #Trending #Tanglish #MustHave)\n\n"
-                "Rules:\n"
-                "- Output ONLY the final caption with hashtags.\n"
-                "- DO NOT number options (NO 1., 2., 3., 4., NO 'Viral:').\n"
-                "- No asterisks like **bold**."
+                "Line 1: Punchy hook with emoji in Tanglish\n"
+                "Line 2-3: 2 short lines on benefits and style in Tanglish\n"
+                "Line 4: Call-To-Action in Tanglish (e.g. Ippovae check out pannunga, link in bio 🛍️)\n\n"
+                "Followed by a blank line and 4-5 relevant product hashtags.\n"
+                "CRITICAL RULES:\n"
+                "- English letters only, NO Tamil script.\n"
+                "- NEVER include #tanglish, #thanglish, or #tamil in hashtags.\n"
+                "- Exactly around 4 lines of caption text.\n"
+                "- Output ONLY the final caption with hashtags."
             )
         else:
             sys_msg = (
-                "You are an elite social media copywriter for Instagram & Facebook.\n"
-                "The user wrote in English.\n"
-                "Write a single, high-converting social media caption entirely in trendy, professional English.\n"
+                "You are an expert commercial copywriter for Instagram & Facebook.\n"
+                "Write a clean, professional, 4-line commercial caption about the product.\n"
+                "Do NOT write about prompts, layouts, or instructions. Write directly as the brand promoting the product.\n\n"
                 "Structure:\n"
-                "- Hook sentence with emoji\n"
-                "- 3-4 short engaging lines explaining benefits and aesthetic appeal\n"
-                "- Call to action (e.g. Shop now, link in bio)\n"
-                "- Total caption body: 5 to 6 lines\n"
-                "- Followed by a blank line and 4-6 clean hashtags (e.g. #Skin #Skincare #GlowingSkin #LuxuryBeauty)\n\n"
-                "Rules:\n"
-                "- Output ONLY the final caption with hashtags.\n"
-                "- DO NOT number options (NO 1., 2., 3., 4., NO 'Viral:').\n"
-                "- No asterisks like **bold**."
+                "Line 1: Punchy hook sentence with emoji\n"
+                "Line 2-3: 2 short lines on benefits and premium quality\n"
+                "Line 4: Clear Call-To-Action (e.g. Shop now via link in bio 🛍️)\n\n"
+                "Followed by a blank line and 4-5 relevant product hashtags.\n"
+                "CRITICAL RULES:\n"
+                "- Write entirely in 100% English. NO Tamil/Tanglish words.\n"
+                "- NEVER include #tanglish or #thanglish in hashtags.\n"
+                "- Exactly around 4 lines of caption text.\n"
+                "- Output ONLY the final caption with hashtags."
             )
 
         payload = {
@@ -181,30 +187,30 @@ def generate_caption(prompt: str) -> str:
                 text = text.replace('**', '').strip()
                 if text.startswith('"') and text.endswith('"'):
                     text = text[1:-1].strip()
+                # Clean any unwanted #tanglish or #thanglish tags
+                text = re.sub(r'#(?:t[ha]nglish|tamil(?:nadu)?)\b', '', text, flags=re.IGNORECASE).strip()
                 return text
     except Exception as e:
         print(f"[Cloudflare LLM Caption Error] {e}")
 
     # Clean keyword for hashtags
     words = [re.sub(r'[^a-zA-Z0-9]', '', w) for w in clean_p.split() if len(w) > 3]
-    kw = words[0].capitalize() if words else "Style"
+    kw = words[0].capitalize() if words else "Product"
 
     if is_tanglish:
         return (
-            f"🔥 Semma stylish drop makkale! {kw} ippo live!\n\n"
+            f"🔥 Semma stylish drop makkale! {kw} ippo live!\n"
             "Daily look-ku romba aesthetic & comfortable-ah irukkum.\n"
-            "Top-notch quality & unmatched performance engineered just for you.\n"
             "Unakku pudicha style-la stand out pannunga.\n"
-            "Ippovae check out pannunga, limited drop mattum thaan!\n\n"
-            f"#{kw} #Tanglish #ViralReels #Trending #TopQuality"
+            "Ippovae check out pannunga, link in bio 🛍️\n\n"
+            f"#{kw} #Trending #NewDrop #TopQuality"
         )
     else:
         return (
-            f"✨ Elevate your everyday aesthetic with {kw}.\n\n"
+            f"✨ Elevate your everyday aesthetic with {kw}.\n"
             "Crafted with perfection for those who demand ultimate sophistication.\n"
-            "Unrivaled comfort, premium finish, and iconic design in every detail.\n"
-            "Transform your routine and experience the luxury you deserve.\n"
-            "Discover the collection today — link in bio.\n\n"
+            "Experience the premium finish and iconic design you deserve.\n"
+            "Discover the collection today — link in bio 🛍️\n\n"
             f"#{kw} #Trending #Aesthetic #MustHave #LuxuryVibes"
         )
 
