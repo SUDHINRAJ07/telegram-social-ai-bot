@@ -160,6 +160,19 @@ def generate_image_bytes(prompt: str):
         except Exception as e:
             print(f"[Cloudflare AI Error on {model}] {e}")
 
+    # 2. Automated High-Resolution Flux Failover (Ensures bot NEVER fails on token/auth error)
+    print("[Image Gen] Cloudflare returned error, switching to emergency Flux engine...")
+    try:
+        encoded = urllib.parse.quote(enhanced_prompt)
+        seed = random.randint(1000, 999999)
+        img_url = f"https://image.pollinations.ai/prompt/{encoded}?model=flux&width=1024&height=1024&nologo=true&seed={seed}"
+        resp = http_session.get(img_url, timeout=30)
+        if resp.status_code == 200 and len(resp.content) > 15000:
+            print(f"[Image Gen] Emergency Flux Success! Size: {len(resp.content)}")
+            return resp.content, img_url
+    except Exception as e:
+        print(f"[Emergency Flux Error] {e}")
+
     return None, None
 
 def get_public_image_url(image_bytes: bytes, existing_url: str = None) -> str:
