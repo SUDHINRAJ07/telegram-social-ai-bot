@@ -1,6 +1,7 @@
 import os
 import sys
 import io
+import re
 import time
 import random
 import socket
@@ -89,46 +90,111 @@ def clean_user_prompt(prompt: str) -> str:
             return p[len(pref):].strip()
     return p
 
-def generate_caption(prompt: str) -> str:
-    """Generates viral social media caption with Gemini, with automatic free fallback."""
-    clean_p = clean_user_prompt(prompt)
-
-    # 1. Try Gemini first
+def optimize_visual_prompt(raw_prompt: str) -> str:
+    """Understands Tanglish/Tamil/English user prompt and transforms it into a 4K photorealistic visual description for Flux."""
+    clean_p = clean_user_prompt(raw_prompt)
+    cf_token = os.getenv("CLOUDFLARE_API_TOKEN", CLOUDFLARE_API_TOKEN)
+    
+    # Use Cloudflare Llama 3.1 to understand Tanglish and build world-class visual prompt
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"
+        url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct"
+        sys_msg = (
+            "You are an expert AI prompt engineer for photographic image generation (Flux / SDXL).\n"
+            "The user input may be in Tanglish (Tamil in English letters), Tamil, or English.\n"
+            "Translate any Tanglish into English if needed, and write a single, rich, photorealistic visual scene description.\n"
+            "Always include the primary physical product or subject, setting, studio lighting, materials, and high-detail aesthetics.\n"
+            "Output ONLY the prompt in English. No introductory text, no explanations, no quotes."
+        )
         payload = {
-            "contents": [{
-                "parts": [{
-                    "text": (
-                        f"Create an engaging, viral social media advertisement caption for: '{clean_p}'.\n"
-                        "Requirements:\n"
-                        "- Catchy headline with emojis\n"
-                        "- 2-3 brief marketing sentences highlighting features/benefits\n"
-                        "- Clear Call to Action (CTA)\n"
-                        "- 5 to 7 trending relevant hashtags\n"
-                        "- Maximum 500 characters total so it fits nicely in social captions\n"
-                        "- Do NOT include excessive asterisks, keep it clean and natural."
-                    )
-                }]
-            }]
+            "messages": [
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": clean_p}
+            ]
         }
-        resp = http_session.post(url, json=payload, timeout=12)
+        headers = {"Authorization": f"Bearer {cf_token}", "Content-Type": "application/json"}
+        resp = requests.post(url, headers=headers, json=payload, timeout=12)
         if resp.status_code == 200:
-            data = resp.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        else:
-            print(f"[Gemini Notice] Status {resp.status_code}, falling back to secondary engine...")
+            text = resp.json().get("result", {}).get("response", "").strip()
+            if text and len(text) > 10:
+                print(f"[AI Prompt Optimizer] Generated visual prompt:\n{text[:120]}...")
+                return text
     except Exception as e:
-        print(f"[Gemini Exception] {e}")
+        print(f"[Prompt Optimizer Error] {e}")
 
-    # 2. High-Converting Fallback Marketing Template
-    tag = clean_p.replace(' ', '')
-    return (
-        f"🔥 Upgrade your style with the all-new {clean_p}!\n\n"
-        "✨ Unmatched quality, sleek design, and ultimate performance crafted just for you.\n\n"
-        "👉 Shop yours today and take your game to the next level!\n\n"
-        f"#{tag} #Trending #MustHave #TopQuality #NewDrop"
+    return clean_p
+
+def parse_caption_options(raw_text: str):
+    """Parses raw text into 4 clean, ultra-short caption strings (caption + hashtags)."""
+    parts = re.split(r'[1-4]️⃣', raw_text)
+    options = []
+    for p in parts[1:]:
+        clean = p.strip()
+        lines = [line.strip() for line in clean.splitlines() if line.strip()]
+        # Strip header like "Viral:" or "**Viral**:"
+        if lines and any(lines[0].lower().startswith(k) for k in ['viral', 'aesthetic', 'tanglish', 'short', 'promo', 'hook', '**']):
+            lines = lines[1:]
+        clean_cap = '\n'.join(lines).replace('**', '').replace('"', '').strip()
+        if clean_cap:
+            options.append(clean_cap)
+    while len(options) < 4:
+        options.append("✨ Elevate your style with unmatched elegance!\n#Style #Trending #MustHave")
+    return options[:4]
+
+def generate_caption(prompt: str):
+    """Generates exactly 4 ultra-short viral caption variations: 1 short punchy line followed by clean hashtags."""
+    clean_p = clean_user_prompt(prompt)
+    cf_token = os.getenv("CLOUDFLARE_API_TOKEN", CLOUDFLARE_API_TOKEN)
+
+    # 1. Primary: Cloudflare Llama 3.1
+    try:
+        url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct"
+        sys_msg = (
+            "You are an expert social media caption copywriter for Instagram & Facebook.\n"
+            "Regardless of how long or detailed the user prompt is, DO NOT describe layouts, graphic designs, or long paragraphs.\n"
+            "Your ONLY job is to write 4 ULTRA-SHORT, ready-to-post captions.\n\n"
+            "Strict structure for every option:\n"
+            "Line 1: Exactly 1 short, punchy sentence with emojis (under 12 words).\n"
+            "Line 2: Exactly 3-4 clean hashtags (e.g. #Style #Trending #MustHave).\n"
+            "No extra paragraphs, no descriptions, no boilerplate after hashtags!\n\n"
+            "Strict format:\n"
+            "1️⃣ Viral:\n[1 short line with emojis]\n#Tag1 #Tag2 #Tag3\n\n"
+            "2️⃣ Aesthetic:\n[1 short line with emojis]\n#Tag1 #Tag2 #Tag3\n\n"
+            "3️⃣ Tanglish:\n[1 short line in English letters like 'Semma stylish look! Grab pannunga']\n#Tag1 #Tag2 #Tag3\n\n"
+            "4️⃣ Short Promo:\n[1 short line with emojis]\n#Tag1 #Tag2 #Tag3"
+        )
+        payload = {
+            "messages": [
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": clean_p}
+            ]
+        }
+        headers = {"Authorization": f"Bearer {cf_token}", "Content-Type": "application/json"}
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        if resp.status_code == 200:
+            full_text = resp.json().get("result", {}).get("response", "").strip()
+            if full_text and len(full_text) > 30:
+                opts = parse_caption_options(full_text)
+                return full_text, opts
+    except Exception as e:
+        print(f"[Cloudflare LLM Caption Error] {e}")
+
+    # 2. Dynamic Fallback 4 Options
+    words = [re.sub(r'[^a-zA-Z0-9]', '', w) for w in clean_p.split() if len(w) > 3]
+    kw = words[0].capitalize() if words else "Style"
+
+    fallback_opts = [
+        f"🔥 Step up your game with timeless perfection!\n#{kw} #Trending #MustHave #Viral",
+        f"✨ Crafted for elegance, designed to turn heads.\n#{kw} #Aesthetic #LuxuryVibes #Style",
+        f"⚡ Semma stylish & mass look! Ippovae check out pannunga.\n#{kw} #Tanglish #ViralReels #MassDrop",
+        f"🚀 Elevate your lifestyle today. Limited stock available!\n#{kw} #BestDeals #NewDrop #ShopNow"
+    ]
+    formatted = (
+        f"1️⃣ Viral:\n{fallback_opts[0]}\n\n"
+        f"2️⃣ Aesthetic:\n{fallback_opts[1]}\n\n"
+        f"3️⃣ Tanglish:\n{fallback_opts[2]}\n\n"
+        f"4️⃣ Short Promo:\n{fallback_opts[3]}"
     )
+    return formatted, fallback_opts
 
 def strip_watermark(image_bytes: bytes) -> bytes:
     """Removes any watermark/logo banner from the bottom of fallback images."""
@@ -302,18 +368,26 @@ def post_to_instagram(image_bytes: bytes, image_url: str, caption: str):
     except Exception as e:
         return False, str(e)
 
-def build_action_keyboard():
-    """Builds inline keyboard with all platform options."""
+def build_action_keyboard(selected_index=1):
+    """Builds inline keyboard with caption selector and publishing options."""
     markup = types.InlineKeyboardMarkup()
+    
+    # 4 Caption Selection buttons
+    btn1 = types.InlineKeyboardButton(f"{'✅ ' if selected_index==1 else ''}1️⃣ Viral", callback_data="sel_cap_1")
+    btn2 = types.InlineKeyboardButton(f"{'✅ ' if selected_index==2 else ''}2️⃣ Aesthetic", callback_data="sel_cap_2")
+    markup.row(btn1, btn2)
+
+    btn3 = types.InlineKeyboardButton(f"{'✅ ' if selected_index==3 else ''}3️⃣ Tanglish", callback_data="sel_cap_3")
+    btn4 = types.InlineKeyboardButton(f"{'✅ ' if selected_index==4 else ''}4️⃣ Promo", callback_data="sel_cap_4")
+    markup.row(btn3, btn4)
+
+    # Social Media Publishing
     btn_fb = types.InlineKeyboardButton("📘 Post to Facebook Page", callback_data="fb_publish")
     btn_ig = types.InlineKeyboardButton("📸 Instagram", callback_data="ig_publish")
     markup.row(btn_fb, btn_ig)
 
-    btn_li = types.InlineKeyboardButton("💼 LinkedIn", callback_data="li_publish")
-    btn_x  = types.InlineKeyboardButton("✖️ X (Twitter)", callback_data="x_publish")
-    markup.row(btn_li, btn_x)
-
-    btn_regen_caption = types.InlineKeyboardButton("🔄 New Caption", callback_data="regen_caption")
+    # Regeneration
+    btn_regen_caption = types.InlineKeyboardButton("🔄 New Captions", callback_data="regen_caption")
     btn_regen_image = types.InlineKeyboardButton("🎨 New Image", callback_data="regen_image")
     markup.row(btn_regen_caption, btn_regen_image)
 
@@ -343,13 +417,16 @@ def handle_prompt(message):
 
     status_msg = bot.send_message(
         chat_id,
-        f"🎨 *Generating 4K ad for:* `{clean_p}`\n\n"
-        "⏳ *Creating photorealistic product image & viral caption...*",
+        "🎨 *Analyzing prompt & creating 4K visuals...*\n\n"
+        "⏳ *Generating photorealistic scene & viral caption...*",
         parse_mode="Markdown"
     )
 
-    # 1. Generate Image
-    img_bytes, img_url = generate_image_bytes(clean_p)
+    # 1. Optimize Prompt for visual generation (Understands Tanglish & builds 4K scene)
+    visual_prompt = optimize_visual_prompt(clean_p)
+
+    # 2. Generate Image with Flux-1
+    img_bytes, img_url = generate_image_bytes(visual_prompt)
     if not img_bytes:
         bot.edit_message_text(
             "❌ Image server is busy. Please send the message again or try another keyword!",
@@ -358,12 +435,15 @@ def handle_prompt(message):
         )
         return
 
-    # 2. Generate Caption
-    caption = generate_caption(clean_p)
+    # 3. Generate 4 Captions (Supports Tanglish & English)
+    full_caption, caption_options = generate_caption(raw_prompt)
 
     # Store in session
     user_sessions[chat_id] = {
-        "caption": caption,
+        "caption": caption_options[0],
+        "caption_options": caption_options,
+        "full_display": full_caption,
+        "selected_index": 1,
         "image_bytes": img_bytes,
         "image_url": img_url,
         "prompt": clean_p
@@ -376,7 +456,7 @@ def handle_prompt(message):
         pass
 
     # Telegram caption character limit is 1024 chars
-    display_caption = caption
+    display_caption = full_caption
     if len(display_caption) > 1000:
         display_caption = display_caption[:990] + "..."
 
@@ -385,7 +465,7 @@ def handle_prompt(message):
         chat_id,
         photo=io.BytesIO(img_bytes),
         caption=display_caption,
-        reply_markup=build_action_keyboard()
+        reply_markup=build_action_keyboard(1)
     )
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -475,24 +555,43 @@ def handle_callback(call):
             parse_mode="Markdown"
         )
 
+    elif call.data.startswith("sel_cap_"):
+        idx = int(call.data.split("_")[-1])
+        if session and "caption_options" in session and len(session["caption_options"]) >= idx:
+            session["selected_index"] = idx
+            session["caption"] = session["caption_options"][idx - 1]
+            names = {1: "1️⃣ Viral", 2: "2️⃣ Aesthetic", 3: "3️⃣ Tanglish", 4: "4️⃣ Promo"}
+            selected_name = names.get(idx, f"Option {idx}")
+            try:
+                bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=build_action_keyboard(idx))
+            except Exception:
+                pass
+            bot.answer_callback_query(call.id, f"✅ Selected {selected_name} for Facebook & Instagram posting!", show_alert=False)
+        else:
+            bot.answer_callback_query(call.id, "⚠️ Session expired. Please send a new prompt.", show_alert=True)
+
     elif call.data == "regen_caption":
         if not session:
             bot.answer_callback_query(call.id, "⚠️ Session expired. Please send a new prompt.", show_alert=True)
             return
 
-        bot.answer_callback_query(call.id, "✍️ Generating new viral caption...")
-        new_caption = generate_caption(session["prompt"])
-        session["caption"] = new_caption
+        bot.answer_callback_query(call.id, "✍️ Generating 4 fresh viral captions...")
+        full_caption, caption_options = generate_caption(session["prompt"])
+        session["caption_options"] = caption_options
+        session["caption"] = caption_options[0]
+        session["full_display"] = full_caption
+        session["selected_index"] = 1
 
+        disp = full_caption[:990] if len(full_caption) > 1000 else full_caption
         try:
             bot.edit_message_caption(
                 chat_id=chat_id,
                 message_id=call.message.message_id,
-                caption=new_caption[:1000],
-                reply_markup=build_action_keyboard()
+                caption=disp,
+                reply_markup=build_action_keyboard(1)
             )
         except Exception:
-            bot.send_message(chat_id, f"📝 *New Caption:*\n\n{new_caption}", parse_mode="Markdown")
+            bot.send_message(chat_id, f"📝 *New 4 Caption Options:*\n\n{disp}", reply_markup=build_action_keyboard(1))
 
     elif call.data == "regen_image":
         if not session:
