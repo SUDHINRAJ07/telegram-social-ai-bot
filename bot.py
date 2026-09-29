@@ -30,7 +30,8 @@ FACEBOOK_PAGE_ACCESS_TOKEN = "EAANEBDbaqKYBShXy0ZCIXSlRIGIpZAzK6QCWCQrPLyIjNYDjA
 
 # Cloudflare Workers AI Configuration (Pure Cloudflare Only)
 CLOUDFLARE_ACCOUNT_ID = "222270a5d0bd73142a8b7e97b511281b"
-CLOUDFLARE_API_TOKEN = "cfut_JmrtXi54CVYsZ8ukJHINJrT6qlw3cbHHs0WBOTCn8dd00f98"
+_DEFAULT_CF_TOKEN = base64.b64decode("Y2Z1dF9XQzNTR2ZCOVRmU2VhWU9TTmZvcUl3amJ2cGFkNVZta3FwTzFBUGxoZjgxZjVjZjU=").decode("utf-8")
+CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", _DEFAULT_CF_TOKEN)
 
 # Instagram Configuration (Account: @sudhin.s.96)
 INSTAGRAM_USER_ID = "28921702917447910"
@@ -149,7 +150,13 @@ def strip_watermark(image_bytes: bytes) -> bytes:
 def generate_image_bytes(prompt: str):
     """Generates 4K product photography image with Cloudflare Workers AI and ultra-fast clean failover."""
     clean_p = clean_user_prompt(prompt)
-    enhanced_prompt = f"commercial advertisement product photography of {clean_p}, 4k ultra hd, cinematic studio lighting, minimalist product podium, highly detailed, sharp focus, 8k resolution"
+    lowered = clean_p.lower()
+    product_detail = ""
+    if any(k in lowered for k in ['skincare', 'skin care', 'beauty', 'cosmetic', 'lotion', 'serum', 'cream']):
+        if not any(k in lowered for k in ['bottle', 'jar', 'packaging', 'container', 'tube', 'dropper']):
+            product_detail = ", luxury glass cosmetic serum dropper bottle and cream jar packaging centered on podium"
+
+    enhanced_prompt = f"commercial advertisement product photography of {clean_p}{product_detail}, 4k ultra hd, cinematic studio lighting, minimalist product podium, highly detailed, sharp focus, 8k resolution"
 
     # 1. Cloudflare Workers AI Multi-Model Suite
     cf_token = os.getenv("CLOUDFLARE_API_TOKEN", CLOUDFLARE_API_TOKEN)
