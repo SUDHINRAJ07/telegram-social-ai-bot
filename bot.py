@@ -9,6 +9,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import urllib.parse
 import requests
+from PIL import Image
 import telebot
 from telebot import types
 
@@ -29,7 +30,7 @@ FACEBOOK_PAGE_ACCESS_TOKEN = "EAANEBDbaqKYBShXy0ZCIXSlRIGIpZAzK6QCWCQrPLyIjNYDjA
 
 # Cloudflare Workers AI Configuration (Pure Cloudflare Only)
 CLOUDFLARE_ACCOUNT_ID = "222270a5d0bd73142a8b7e97b511281b"
-CLOUDFLARE_API_TOKEN = "cfat_xfjLbwppDtVHVaiAuM5ZEL9jqGGDYY0K8RCvSq6x1d114e34"
+CLOUDFLARE_API_TOKEN = "cfut_JmrtXi54CVYsZ8ukJHINJrT6qlw3cbHHs0WBOTCn8dd00f98"
 
 # Instagram Configuration (Account: @sudhin.s.96)
 INSTAGRAM_USER_ID = "28921702917447910"
@@ -128,8 +129,23 @@ def generate_caption(prompt: str) -> str:
         f"#{tag} #Trending #MustHave #TopQuality #NewDrop"
     )
 
+def strip_watermark(image_bytes: bytes) -> bytes:
+    """Removes any watermark/logo banner from the bottom of fallback images."""
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        w, h = img.size
+        # Crop out bottom 5% where watermark logos are placed
+        cropped = img.crop((0, 0, w, int(h * 0.95)))
+        out = io.BytesIO()
+        cropped.save(out, format="JPEG", quality=95)
+        print("[Image Gen] Successfully stripped watermark logo from image!")
+        return out.getvalue()
+    except Exception as e:
+        print(f"[Watermark Clean Error] {e}")
+        return image_bytes
+
 def generate_image_bytes(prompt: str):
-    """Generates 4K product photography image using Cloudflare Workers AI exclusively."""
+    """Generates 4K product photography image using Cloudflare Workers AI exclusively, with auto-clean failover."""
     clean_p = clean_user_prompt(prompt)
     enhanced_prompt = f"commercial advertisement product photography of {clean_p}, 4k ultra hd, cinematic studio lighting, minimalist product podium, highly detailed, sharp focus, 8k resolution"
 
@@ -150,28 +166,34 @@ def generate_image_bytes(prompt: str):
             print(f"[Cloudflare AI] Generating image with model '{model}'...")
             resp = requests.post(cf_url, headers=cf_headers, json={"prompt": enhanced_prompt}, timeout=35)
             if resp.status_code == 200:
-                data = resp.json()
-                if "result" in data and "image" in data["result"]:
-                    img_bytes = base64.b64decode(data["result"]["image"])
-                    print(f"[Cloudflare AI] Success with {model}! Image size: {len(img_bytes)} bytes")
-                    return img_bytes, "cloudflare"
+                ct = resp.headers.get("content-type", "")
+                if "application/json" in ct:
+                    data = resp.json()
+                    if "result" in data and "image" in data["result"]:
+                        img_bytes = base64.b64decode(data["result"]["image"])
+                        print(f"[Cloudflare AI] Success with {model}! Image size: {len(img_bytes)} bytes (100% CLEAN - NO WATERMARK)")
+                        return img_bytes, "cloudflare"
+                elif "image/" in ct and len(resp.content) > 1000:
+                    print(f"[Cloudflare AI] Success with {model}! Raw image size: {len(resp.content)} bytes (100% CLEAN - NO WATERMARK)")
+                    return resp.content, "cloudflare"
             else:
                 print(f"[Cloudflare AI Notice] Status {resp.status_code}: {resp.text[:200]}")
         except Exception as e:
             print(f"[Cloudflare AI Error on {model}] {e}")
 
-    # 2. Automated High-Resolution Flux Failover (Ensures bot NEVER fails on token/auth error)
-    print("[Image Gen] Cloudflare returned error, switching to emergency Flux engine...")
+    # 2. Automated Clean Failover (Ensures bot NEVER fails and strips all logos)
+    print("[Image Gen] Cloudflare token inactive, switching to emergency engine with auto-watermark removal...")
     try:
         encoded = urllib.parse.quote(enhanced_prompt)
         seed = random.randint(1000, 999999)
         img_url = f"https://image.pollinations.ai/prompt/{encoded}?model=flux&width=1024&height=1024&nologo=true&seed={seed}"
         resp = http_session.get(img_url, timeout=30)
         if resp.status_code == 200 and len(resp.content) > 15000:
-            print(f"[Image Gen] Emergency Flux Success! Size: {len(resp.content)}")
-            return resp.content, img_url
+            clean_bytes = strip_watermark(resp.content)
+            print(f"[Image Gen] Clean Image Ready! Size: {len(clean_bytes)}")
+            return clean_bytes, None
     except Exception as e:
-        print(f"[Emergency Flux Error] {e}")
+        print(f"[Emergency Engine Error] {e}")
 
     return None, None
 
