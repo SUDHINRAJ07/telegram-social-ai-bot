@@ -20,19 +20,6 @@ if sys.platform.startswith('win'):
     except Exception:
         pass
 
-# ================= DNS Fix for Windows =================
-# Directly route pollinations.ai domains to Cloudflare Anycast IPv4 to prevent Windows getaddrinfo DNS timeouts
-_orig_getaddrinfo = socket.getaddrinfo
-def _patched_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-    if host and 'pollinations.ai' in host:
-        return [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('104.21.30.173', port)),
-            (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('172.67.173.121', port))
-        ]
-    return _orig_getaddrinfo(host, port, family, type, proto, flags)
-
-socket.getaddrinfo = _patched_getaddrinfo
-
 # ================= Configuration =================
 TELEGRAM_BOT_TOKEN = "8763763506:AAHjvN7Yw86oNBsYmyqSKNTqOQ1yx_w2llg"
 GEMINI_API_KEY = "AQ.Ab8RN6LpXEJ00GXrdMA-ZVEJVSLPgaTsf8L8ZRGMt2Efm3lWiw"
@@ -40,9 +27,9 @@ FACEBOOK_PAGE_ID = "1276584508878950"
 # 100% Never-Expiring Lifetime Facebook Page Access Token (expires_at: 0)
 FACEBOOK_PAGE_ACCESS_TOKEN = "EAANEBDbaqKYBShXy0ZCIXSlRIGIpZAzK6QCWCQrPLyIjNYDjAtxPcnRU9kMDkU7XSxsbjD3oZCwZB76IQGcYQrUxqkRb4KZCIUZAgB3VWhwxaQOvkuaSJhdp8xFwiZBj2hsuZAFCWH1h7KfTZBRrwd3MKA41lnnQs4LQQyvJWFGZACkZALj4NZBdMpavXu4o9973SZAjC5YJQxqni"
 
-# Cloudflare Workers AI Configuration (Flux-1-schnell & SDXL)
+# Cloudflare Workers AI Configuration (Pure Cloudflare Only)
 CLOUDFLARE_ACCOUNT_ID = "222270a5d0bd73142a8b7e97b511281b"
-CLOUDFLARE_API_TOKEN = "cfat_lNL817Qtod80mbUxY4h5zr9JYTQupGyL6sMd1QwK4339f969"
+CLOUDFLARE_API_TOKEN = "cfat_xfjLbwppDtVHVaiAuM5ZEL9jqGGDYY0K8RCvSq6x1d114e34"
 
 # Instagram Configuration (Account: @sudhin.s.96)
 INSTAGRAM_USER_ID = "28921702917447910"
@@ -132,26 +119,7 @@ def generate_caption(prompt: str) -> str:
     except Exception as e:
         print(f"[Gemini Exception] {e}")
 
-    # 2. Free High-Performance Fallback (GPT-4o via Pollinations Text)
-    try:
-        url = "https://text.pollinations.ai/"
-        payload = {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are an elite social media copywriter. Write a punchy, viral marketing caption with emojis, compelling hook, short benefit, clear CTA, and 5-6 hashtags. Under 450 characters."
-                },
-                {"role": "user", "content": f"Product: {clean_p}"}
-            ],
-            "model": "openai"
-        }
-        resp = http_session.post(url, json=payload, timeout=15)
-        if resp.status_code == 200 and resp.text.strip():
-            return resp.text.strip()
-    except Exception as e:
-        print(f"[Fallback Caption Error] {e}")
-
-    # 3. Static High-Quality Template
+    # 2. High-Converting Fallback Marketing Template
     tag = clean_p.replace(' ', '')
     return (
         f"🔥 Upgrade your style with the all-new {clean_p}!\n\n"
@@ -161,14 +129,15 @@ def generate_caption(prompt: str) -> str:
     )
 
 def generate_image_bytes(prompt: str):
-    """Generates 4K product photography image using Cloudflare Workers AI (Flux 1 Schnell), with multi-model fallback."""
+    """Generates 4K product photography image using Cloudflare Workers AI exclusively."""
     clean_p = clean_user_prompt(prompt)
     enhanced_prompt = f"commercial advertisement product photography of {clean_p}, 4k ultra hd, cinematic studio lighting, minimalist product podium, highly detailed, sharp focus, 8k resolution"
 
-    # 1. Primary Engine: Cloudflare Workers AI (Flux-1-schnell & SDXL)
+    # Pure Cloudflare Workers AI Multi-Model Suite
     cf_models = [
         "@cf/black-forest-labs/flux-1-schnell",
-        "@cf/stabilityai/stable-diffusion-xl-base-1.0"
+        "@cf/stabilityai/stable-diffusion-xl-base-1.0",
+        "@cf/bytedance/stable-diffusion-xl-lightning"
     ]
     cf_headers = {
         "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
@@ -190,20 +159,6 @@ def generate_image_bytes(prompt: str):
                 print(f"[Cloudflare AI Notice] Status {resp.status_code}: {resp.text[:200]}")
         except Exception as e:
             print(f"[Cloudflare AI Error on {model}] {e}")
-
-    # 2. Fallback Engine: Pollinations Flux / Turbo
-    print("[Image Gen] Falling back to secondary engine (Pollinations)...")
-    encoded = urllib.parse.quote(enhanced_prompt)
-    for model in ["flux", "turbo"]:
-        seed = random.randint(1000, 999999)
-        img_url = f"https://image.pollinations.ai/prompt/{encoded}?model={model}&width=1024&height=1024&nologo=true&seed={seed}"
-        try:
-            resp = http_session.get(img_url, timeout=30)
-            if resp.status_code == 200 and len(resp.content) > 15000:
-                print(f"[Image Gen Fallback] Success! Image size: {len(resp.content)} bytes")
-                return resp.content, img_url
-        except Exception as e:
-            print(f"[Image Gen Fallback Error] {e}")
 
     return None, None
 
@@ -517,8 +472,8 @@ if __name__ == "__main__":
     print("[BOT] Social Media Agent AI Telegram Bot is starting...")
     print(f"[BOT] Connected Facebook Page ID: {FACEBOOK_PAGE_ID}")
     print(f"[BOT] Connected Instagram Account: @{INSTAGRAM_USERNAME} (ID: {INSTAGRAM_USER_ID})")
-    print("[BOT] Image Engine: Cloudflare Workers AI (Flux 1 Schnell) with Auto-Fallback (ACTIVE)")
-    print("[BOT] Caption Engine: Gemini AI with Auto-GPT Fallback (ACTIVE)")
+    print("[BOT] Image Engine: Pure Cloudflare Workers AI Suite (Flux 1 Schnell & SDXL) - ACTIVE")
+    print("[BOT] Caption Engine: Gemini AI with Auto-Fallback (ACTIVE)")
     print("[BOT] Polling Telegram servers for incoming user messages... (READY)")
     print("=" * 60)
     bot.infinity_polling(timeout=25, long_polling_timeout=25)
